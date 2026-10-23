@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mastermind</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="wordmark" href="#/play" aria-label="Mastermind home">
+      <span class="wordmark-dots" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+      mastermind
+    </a>
+    <nav id="nav" class="nav" hidden>
+      <a href="#/play" data-route="play">Play</a>
+      <a href="#/stats" data-route="stats">My stats</a>
+      <a href="#/leaderboard" data-route="leaderboard">Leaderboard</a>
+    </nav>
+    <div id="account" class="account" hidden>
+      <span id="account-name" class="account-name"></span>
+      <button id="logout" class="btn btn-ghost btn-small" type="button">Log out</button>
+    </div>
+  </header>
+  <main id="view" class="view" tabindex="-1"></main>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>
