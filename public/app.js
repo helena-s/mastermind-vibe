@@ -131,26 +131,40 @@ async function startGame() {
   renderGame(game);
 }
 
+const TIMER_PREF = 'mm.hideTimer';
+
 function renderGame(game) {
   clearInterval(timerHandle);
   const finished = game.status !== 'in_progress';
-  const current = [];
+  // The guess being built: one entry per slot, null while empty.
+  const current = new Array(CODE_LENGTH).fill(null);
   // Clock offset so the timer reflects server time even if the device clock is off.
   const skew = Date.now() - new Date(game.serverNow).getTime();
   const started = new Date(game.startedAt).getTime() + skew;
 
-  const timer = el('div', { class: 'timer', 'aria-live': 'off' });
-  const tick = () => {
+  // The timer is deliberately low-key and can be hidden; time is still
+  // recorded on the server for stats either way.
+  let timerHidden = localStorage.getItem(TIMER_PREF) === '1';
+  const timer = el('span', { class: 'timer', 'aria-live': 'off' });
+  const timerToggle = el('button', { class: 'link-btn', type: 'button', onclick: () => {
+    timerHidden = !timerHidden;
+    localStorage.setItem(TIMER_PREF, timerHidden ? '1' : '0');
+    tick();
+  } });
+  function tick() {
     const end = finished ? new Date(game.finishedAt).getTime() + skew : Date.now();
-    timer.textContent = fmtTime((end - started) / 1000);
-  };
+    timer.textContent = `⏱ ${fmtTime((end - started) / 1000)}`;
+    timer.hidden = timerHidden;
+    timerToggle.textContent = timerHidden ? 'Show time' : 'Hide';
+  }
   tick();
-  if (!finished) timerHandle = setInterval(tick, 500);
+  if (!finished) timerHandle = setInterval(() => { if (!timerHidden) tick(); }, 1000);
 
   const board = el('div', { class: 'board', role: 'list', 'aria-label': 'Guesses' });
   const submitBtn = el('button', { class: 'btn', type: 'button', onclick: submit }, 'Guess');
-  const clearBtn = el('button', { class: 'btn btn-ghost', type: 'button', onclick: () => { current.length = 0; draw(); } }, 'Clear');
+  const clearBtn = el('button', { class: 'btn btn-ghost', type: 'button', onclick: () => { current.fill(null); draw(); } }, 'Clear');
   let busy = false;
+  const filled = () => current.filter((c) => c != null).length;
 
   function feedbackNode(black, white) {
     const dots = [];
@@ -169,14 +183,17 @@ function renderGame(game) {
       const isActive = !finished && i === game.guesses.length;
       let slots;
       if (g) {
-        slots = g.guess.map((c) => peg(c));
+        // Earlier guesses can be dragged down to reuse a colour.
+        slots = g.guess.map((c) => peg(c, finished ? {} : { 'data-drag': 'copy', 'data-colour': c }));
       } else if (isActive) {
-        slots = Array.from({ length: CODE_LENGTH }, (_, j) => {
-          const c = current[j];
-          return c == null
-            ? peg(null, { tag: 'button', type: 'button', 'aria-label': `Slot ${j + 1}, empty`, disabled: true })
-            : peg(c, { tag: 'button', type: 'button', 'aria-label': `Slot ${j + 1}, ${PEGS[c].name}. Remove`, onclick: () => { current.splice(j, 1); draw(); } });
-        });
+        slots = current.map((c, j) => c == null
+          ? peg(null, { tag: 'button', type: 'button', 'data-slot': j, 'aria-label': `Slot ${j + 1}, empty`, tabindex: '-1' })
+          : peg(c, {
+              tag: 'button', type: 'button', 'data-slot': j, 'data-drag': 'slot', 'data-colour': c,
+              'aria-label': `Slot ${j + 1}, ${PEGS[c].name}. Remove`,
+              // Keyboard activation only; pointer clicks are handled by the drag code.
+              onclick: (e) => { if (e.detail === 0) { current[j] = null; draw(); } },
+            }));
       } else {
         slots = Array.from({ length: CODE_LENGTH }, () => peg(null));
       }
@@ -190,18 +207,25 @@ function renderGame(game) {
         g ? feedbackNode(g.black, g.white) : el('div', { class: 'row-right' }, el('span', { class: 'fb-text' }), el('div', { class: 'feedback' }, Array.from({ length: 4 }, () => el('span', { class: 'fb' }))))));
     }
     board.replaceChildren(...rows);
-    submitBtn.disabled = busy || current.length !== CODE_LENGTH;
-    clearBtn.disabled = busy || current.length === 0;
+    submitBtn.disabled = busy || filled() !== CODE_LENGTH;
+    clearBtn.disabled = busy || filled() === 0;
   }
 
   function add(c) {
-    if (finished || current.length >= CODE_LENGTH) return;
-    current.push(c);
+    const free = current.indexOf(null);
+    if (finished || free === -1) return;
+    current[free] = c;
     draw();
   }
 
+  function undo() {
+    for (let j = CODE_LENGTH - 1; j >= 0; j--) {
+      if (current[j] != null) { current[j] = null; draw(); return; }
+    }
+  }
+
   async function submit() {
-    if (busy || current.length !== CODE_LENGTH) return;
+    if (busy || filled() !== CODE_LENGTH) return;
     busy = true;
     draw();
     try {
@@ -219,9 +243,99 @@ function renderGame(game) {
     await startGame();
   }
 
+  // --- Drag and drop (pointer events, so mouse and touch behave the same) ---
+  // A press that barely moves is a click: palette adds to the first free
+  // slot, a placed peg is removed. Otherwise the peg follows the pointer and
+  // lands in whichever slot of the active row it is dropped on.
+  const DRAG_THRESHOLD = 6;
+  let drag = null;
+
+  function slotUnder(x, y) {
+    const hit = document.elementFromPoint(x, y)?.closest('[data-slot]');
+    return hit && board.contains(hit) ? hit : null;
+  }
+
+  function onPointerDown(e) {
+    const src = e.target.closest('[data-drag]');
+    if (!src || finished || busy || e.button > 0) return;
+    e.preventDefault();
+    drag = {
+      kind: src.dataset.drag,
+      colour: Number(src.dataset.colour),
+      from: src.dataset.slot != null ? Number(src.dataset.slot) : null,
+      src, x: e.clientX, y: e.clientY, ghost: null, target: null,
+    };
+    document.addEventListener('pointermove', onPointerMove);
+    document.addEventListener('pointerup', onPointerUp);
+    document.addEventListener('pointercancel', endDrag);
+  }
+
+  function onPointerMove(e) {
+    if (!drag) return;
+    if (!drag.ghost) {
+      if (Math.hypot(e.clientX - drag.x, e.clientY - drag.y) < DRAG_THRESHOLD) return;
+      drag.ghost = peg(drag.colour);
+      drag.ghost.classList.add('drag-ghost');
+      document.body.append(drag.ghost);
+      drag.src.classList.add('drag-source');
+      document.body.classList.add('dragging');
+    }
+    drag.ghost.style.left = `${e.clientX}px`;
+    drag.ghost.style.top = `${e.clientY}px`;
+    const target = slotUnder(e.clientX, e.clientY);
+    if (target !== drag.target) {
+      drag.target?.classList.remove('drop-target');
+      target?.classList.add('drop-target');
+      drag.target = target;
+    }
+  }
+
+  function onPointerUp(e) {
+    if (!drag) return;
+    const { kind, colour, from, ghost } = drag;
+    if (!ghost) {
+      // A click.
+      if (kind === 'palette') add(colour);
+      else if (kind === 'slot') { current[from] = null; draw(); }
+    } else {
+      const target = slotUnder(e.clientX, e.clientY);
+      if (target) {
+        const to = Number(target.dataset.slot);
+        if (kind === 'slot') {
+          // Moving a placed peg swaps it with whatever was there.
+          current[from] = current[to];
+        }
+        current[to] = colour;
+      } else if (kind === 'slot') {
+        // Dragged off the row: take it out.
+        current[from] = null;
+      }
+      endDrag();
+      draw();
+      return;
+    }
+    endDrag();
+  }
+
+  function endDrag() {
+    if (!drag) return;
+    drag.ghost?.remove();
+    drag.src.classList.remove('drag-source');
+    drag.target?.classList.remove('drop-target');
+    document.body.classList.remove('dragging');
+    document.removeEventListener('pointermove', onPointerMove);
+    document.removeEventListener('pointerup', onPointerUp);
+    document.removeEventListener('pointercancel', endDrag);
+    drag = null;
+  }
+
   const palette = el('div', { class: 'palette', role: 'group', 'aria-label': 'Colours' },
     PEGS.map((p, c) => el('div', { class: 'palette-item' },
-      peg(c, { tag: 'button', type: 'button', 'aria-label': `Add ${p.name} (key ${c + 1})`, onclick: () => add(c), disabled: finished }),
+      peg(c, {
+        tag: 'button', type: 'button', 'data-drag': 'palette', 'data-colour': c,
+        'aria-label': `Add ${p.name} (key ${c + 1})`, disabled: finished,
+        onclick: (e) => { if (e.detail === 0) add(c); },
+      }),
       el('span', {}, `${c + 1} · ${p.name}`))));
 
   let result = null;
@@ -229,19 +343,21 @@ function renderGame(game) {
     const won = game.status === 'won';
     result = el('div', { class: `result ${won ? 'won' : 'lost'}` },
       el('h2', {}, won ? `Cracked in ${game.score} ${game.score === 1 ? 'guess' : 'guesses'}!` : game.status === 'abandoned' ? 'Game abandoned' : 'Out of guesses'),
-      el('p', {}, won ? `+${game.points} points in ${fmtTime((new Date(game.finishedAt) - new Date(game.startedAt)) / 1000)}.` : 'The code was:'),
+      el('p', {}, won ? `+${game.points} points.` : 'The code was:'),
       won ? null : el('div', { class: 'slots', 'aria-label': codeLabel(game.secret) }, game.secret.map((c) => peg(c))),
       el('button', { class: 'btn', type: 'button', onclick: startGame }, 'Play again'));
   }
 
+  const status = el('div', { class: 'card status-card' },
+    el('span', { class: 'guess-count' }, `Guess ${Math.min(game.guesses.length + (finished ? 0 : 1), MAX_GUESSES)} of ${MAX_GUESSES}`),
+    el('span', { class: 'timer-wrap' }, timer, timerToggle));
+
   const side = el('aside', { class: 'side' },
     result,
-    el('div', { class: 'card timer-card' },
-      el('div', { class: 'timer-label' }, finished ? 'Time' : 'Time elapsed'),
-      timer,
-      el('div', { class: 'timer-label' }, `Guess ${Math.min(game.guesses.length + (finished ? 0 : 1), MAX_GUESSES)} of ${MAX_GUESSES}`)),
+    status,
     finished ? null : el('div', { class: 'card picker' },
       el('h3', {}, 'Pick colours'),
+      el('p', { class: 'picker-hint' }, 'Drag a colour into any slot, or click to fill the next one.'),
       palette,
       el('div', { class: 'controls' }, clearBtn, submitBtn),
       el('div', { class: 'keys' }, el('kbd', {}, '1'), '–', el('kbd', {}, '6'), ' add · ', el('kbd', {}, '⌫'), ' undo · ', el('kbd', {}, 'Enter'), ' guess')),
@@ -251,12 +367,14 @@ function renderGame(game) {
       el('div', {}, el('span', { class: 'fb white' }), 'Right colour, wrong place')),
     finished ? null : el('button', { class: 'btn btn-ghost btn-small give-up', type: 'button', onclick: newGame }, 'Give up & start new game'));
 
-  view.replaceChildren(el('section', { class: 'game' }, board, side));
+  const section = el('section', { class: 'game' }, board, side);
+  section.addEventListener('pointerdown', onPointerDown);
+  view.replaceChildren(section);
 
   document.onkeydown = finished ? null : (e) => {
     if (e.target.closest('input, textarea') || e.metaKey || e.ctrlKey || e.altKey) return;
     if (/^[1-6]$/.test(e.key)) { add(Number(e.key) - 1); e.preventDefault(); }
-    else if (e.key === 'Backspace') { current.pop(); draw(); e.preventDefault(); }
+    else if (e.key === 'Backspace') { undo(); e.preventDefault(); }
     else if (e.key === 'Enter' && !e.target.closest('button')) { submit(); e.preventDefault(); }
   };
   draw();

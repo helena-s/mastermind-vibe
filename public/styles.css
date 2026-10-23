@@ -123,8 +123,24 @@ button.peg:hover { filter: brightness(1.12); }
 .row-right { display: flex; align-items: center; gap: 0.75rem; }
 
 .side { display: flex; flex-direction: column; gap: 1rem; position: sticky; top: 1rem; }
-.timer { font-variant-numeric: tabular-nums; font-size: 2rem; font-weight: 600; letter-spacing: 0.02em; }
-.timer-label { font-size: 0.8rem; color: var(--ink-muted); text-transform: uppercase; letter-spacing: 0.08em; }
+.status-card { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 0.9rem 1.25rem; }
+.guess-count { font-weight: 600; }
+.timer-wrap { display: inline-flex; align-items: center; gap: 0.6rem; font-size: 0.82rem; color: var(--ink-muted); }
+.timer { font-variant-numeric: tabular-nums; }
+.link-btn { font: inherit; font-size: 0.78rem; color: var(--ink-muted); background: none; border: 0; padding: 0; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+.link-btn:hover { color: var(--ink); }
+.picker-hint { font-size: 0.8rem; color: var(--ink-muted); margin: -0.4rem 0 0.25rem; }
+
+/* Drag and drop */
+.peg[data-drag] { touch-action: none; cursor: grab; user-select: none; -webkit-user-select: none; }
+body.dragging, body.dragging * { cursor: grabbing !important; }
+.drag-source { opacity: 0.35; }
+.drag-ghost {
+  position: fixed; z-index: 50; pointer-events: none; transform: translate(-50%, -50%) scale(1.1);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.45);
+}
+.peg.drop-target { outline: 3px solid var(--accent); outline-offset: 3px; }
+.row.active .peg.empty { cursor: default; }
 .palette { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.75rem; justify-items: center; margin: 0.5rem 0 1rem; }
 .palette-item { display: flex; flex-direction: column; align-items: center; gap: 0.2rem; font-size: 0.72rem; color: var(--ink-muted); }
 .palette .peg { --size: 3rem; }
@@ -197,11 +213,9 @@ tr.me td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
   .game { grid-template-columns: 1fr; gap: 0.75rem; }
   /* Let the side cards join the grid so the board can sit between them. */
   .side { display: contents; }
-  .result, .timer-card { order: -1; }
-  .timer-card { display: flex; align-items: baseline; gap: 1rem; padding: 0.75rem 1.25rem; }
-  .timer-card .timer { font-size: 1.4rem; }
+  .result, .status-card { order: -1; }
   .picker { position: sticky; bottom: 0; z-index: 3; padding: 1rem; box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.35); }
-  .picker h3, .keys { display: none; }
+  .picker h3, .keys, .picker-hint { display: none; }
   .palette { grid-template-columns: repeat(6, 1fr); gap: 0.25rem; margin: 0 0 0.75rem; }
   .palette .peg { --size: 2.6rem; }
   .palette-item span:not([aria-hidden]) { display: none; }
