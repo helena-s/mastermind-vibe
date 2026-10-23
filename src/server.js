@@ -1,9 +1,8 @@
 import express from 'express';
-import bcrypt from 'bcryptjs';
-import { createHash, randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { pool, migrate, tx } from './db.js';
+import { identify, TOKEN_HEADER } from './auth.js';
 import {
   CODE_LENGTH, COLOURS, MAX_GUESSES, LOSS_SCORE,
   newSecret, isValidGuess, scoreGuess, pointsFor,
@@ -11,9 +10,7 @@ import {
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const PORT = Number(process.env.PORT) || 8080;
-const SESSION_DAYS = 30;
 const LEADERBOARD_MIN_GAMES = 5;
-const COOKIE = 'mm_session';
 
 const app = express();
 app.set('trust proxy', true);
@@ -40,135 +37,33 @@ app.use('/api', (req, res, next) => {
   next();
 });
 
-const hashToken = (t) => createHash('sha256').update(t).digest('hex');
-
-function readCookie(req, name) {
-  for (const part of (req.headers.cookie || '').split(';')) {
-    const [k, ...v] = part.trim().split('=');
-    if (k === name) return decodeURIComponent(v.join('='));
-  }
-  return null;
-}
-
-async function startSession(req, res, userId) {
-  const token = randomBytes(32).toString('base64url');
-  await pool.query(
-    `INSERT INTO sessions (token_hash, user_id, expires_at)
-     VALUES ($1, $2, now() + make_interval(days => $3))`,
-    [hashToken(token), userId, SESSION_DAYS]
-  );
-  res.cookie(COOKIE, token, {
-    httpOnly: true,
-    sameSite: 'lax',
-    secure: req.secure,
-    maxAge: SESSION_DAYS * 86400 * 1000,
-    path: '/',
-  });
-}
-
-async function loadUser(req, res, next) {
-  const token = readCookie(req, COOKIE);
-  if (token) {
-    const { rows } = await pool.query(
-      `SELECT u.id, u.username FROM sessions s JOIN users u ON u.id = s.user_id
-       WHERE s.token_hash = $1 AND s.expires_at > now()`,
-      [hashToken(token)]
-    );
-    req.user = rows[0];
-  }
-  next();
-}
-
-function requireUser(req, res, next) {
-  if (!req.user) return res.status(401).json({ error: 'Please log in' });
-  next();
-}
-
 // Wrap async handlers so a rejected promise reaches the error handler.
 const h = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
-app.use('/api', h(loadUser));
-
-// --- Login throttling (per instance; good enough to slow down guessing) ---
-const failures = new Map();
-const FAIL_WINDOW_MS = 15 * 60 * 1000;
-const FAIL_LIMIT = 10;
-function throttleKey(req, username) {
-  return `${req.ip}|${String(username).toLowerCase()}`;
-}
-function isThrottled(key) {
-  const f = failures.get(key);
-  if (!f || Date.now() - f.first > FAIL_WINDOW_MS) return false;
-  return f.count >= FAIL_LIMIT;
-}
-function recordFailure(key) {
-  const f = failures.get(key);
-  if (!f || Date.now() - f.first > FAIL_WINDOW_MS) failures.set(key, { first: Date.now(), count: 1 });
-  else f.count++;
-}
-setInterval(() => {
-  for (const [k, f] of failures) if (Date.now() - f.first > FAIL_WINDOW_MS) failures.delete(k);
-}, 60_000).unref();
-
-// --- Auth ---
-const USERNAME_RE = /^[A-Za-z0-9_-]{3,20}$/;
-
-app.post('/api/register', h(async (req, res) => {
-  const { username, password } = req.body || {};
-  if (typeof username !== 'string' || !USERNAME_RE.test(username)) {
-    return res.status(400).json({ error: 'Username must be 3–20 characters: letters, digits, _ or -' });
-  }
-  if (typeof password !== 'string' || password.length < 8 || password.length > 200) {
-    return res.status(400).json({ error: 'Password must be at least 8 characters' });
-  }
-  const hash = await bcrypt.hash(password, 12);
-  let user;
+// Who is calling: the Elastx account the gateway logged in. The first visit
+// creates the player; later visits keep name and email in sync with SSO.
+app.use('/api', h(async (req, res, next) => {
+  let identity;
   try {
-    const { rows } = await pool.query(
-      'INSERT INTO users (username, password_hash) VALUES ($1, $2) RETURNING id, username',
-      [username, hash]
-    );
-    user = rows[0];
+    identity = await identify(req.get(TOKEN_HEADER));
   } catch (err) {
-    if (err.code === '23505') return res.status(409).json({ error: 'That username is taken' });
-    throw err;
-  }
-  await startSession(req, res, user.id);
-  res.status(201).json({ user });
-}));
-
-app.post('/api/login', h(async (req, res) => {
-  const { username, password } = req.body || {};
-  if (typeof username !== 'string' || typeof password !== 'string') {
-    return res.status(400).json({ error: 'Username and password are required' });
-  }
-  const key = throttleKey(req, username);
-  if (isThrottled(key)) {
-    return res.status(429).json({ error: 'Too many attempts. Try again in a few minutes.' });
+    console.warn(`identity check failed: ${err.code || ''} ${err.message}`);
+    return res.status(401).json({ error: 'Could not confirm your Elastx login. Try reloading the page.' });
   }
   const { rows } = await pool.query(
-    'SELECT id, username, password_hash FROM users WHERE lower(username) = lower($1)',
-    [username]
+    `INSERT INTO users (sub, email, name) VALUES ($1, $2, $3)
+     ON CONFLICT (sub) DO UPDATE SET email = EXCLUDED.email, name = EXCLUDED.name
+       WHERE users.email IS DISTINCT FROM EXCLUDED.email OR users.name IS DISTINCT FROM EXCLUDED.name
+     RETURNING id, name`,
+    [identity.sub, identity.email, identity.name]
   );
-  const user = rows[0];
-  if (!user || !(await bcrypt.compare(password, user.password_hash))) {
-    recordFailure(key);
-    return res.status(401).json({ error: 'Wrong username or password' });
-  }
-  failures.delete(key);
-  await startSession(req, res, user.id);
-  res.json({ user: { id: user.id, username: user.username } });
-}));
-
-app.post('/api/logout', h(async (req, res) => {
-  const token = readCookie(req, COOKIE);
-  if (token) await pool.query('DELETE FROM sessions WHERE token_hash = $1', [hashToken(token)]);
-  res.clearCookie(COOKIE, { path: '/' });
-  res.json({ ok: true });
+  // RETURNING is empty when nothing changed, so fall back to a lookup.
+  req.user = rows[0] || (await pool.query('SELECT id, name FROM users WHERE sub = $1', [identity.sub])).rows[0];
+  next();
 }));
 
 app.get('/api/me', (req, res) => {
-  res.json({ user: req.user || null });
+  res.json({ user: req.user });
 });
 
 app.get('/api/config', (req, res) => {
@@ -195,7 +90,7 @@ async function gameView(db, game) {
   };
 }
 
-app.get('/api/games/current', requireUser, h(async (req, res) => {
+app.get('/api/games/current', h(async (req, res) => {
   const { rows } = await pool.query(
     "SELECT * FROM games WHERE user_id = $1 AND status = 'in_progress'",
     [req.user.id]
@@ -204,7 +99,7 @@ app.get('/api/games/current', requireUser, h(async (req, res) => {
 }));
 
 // Starting a new game abandons any unfinished one; it counts as a loss.
-app.post('/api/games', requireUser, h(async (req, res) => {
+app.post('/api/games', h(async (req, res) => {
   const game = await tx(async (db) => {
     // Serialise per user so two quick clicks can't race on the active-game index.
     await db.query('SELECT id FROM users WHERE id = $1 FOR UPDATE', [req.user.id]);
@@ -222,7 +117,7 @@ app.post('/api/games', requireUser, h(async (req, res) => {
   res.status(201).json({ game });
 }));
 
-app.post('/api/games/:id/guesses', requireUser, h(async (req, res) => {
+app.post('/api/games/:id/guesses', h(async (req, res) => {
   const guess = req.body?.guess;
   if (!isValidGuess(guess)) {
     return res.status(400).json({ error: `A guess is ${CODE_LENGTH} colours, each 0–${COLOURS - 1}` });
@@ -268,7 +163,7 @@ app.post('/api/games/:id/guesses', requireUser, h(async (req, res) => {
 // --- Stats ---
 const FINISHED = "status IN ('won', 'lost', 'abandoned')";
 
-app.get('/api/stats/me', requireUser, h(async (req, res) => {
+app.get('/api/stats/me', h(async (req, res) => {
   const uid = req.user.id;
   const { rows: [summary] } = await pool.query(
     `SELECT count(*)::int AS games,
@@ -301,9 +196,9 @@ app.get('/api/stats/me', requireUser, h(async (req, res) => {
   res.json({ summary, histogram: hist, recent });
 }));
 
-app.get('/api/leaderboard', requireUser, h(async (req, res) => {
+app.get('/api/leaderboard', h(async (req, res) => {
   const { rows } = await pool.query(
-    `SELECT u.id, u.username,
+    `SELECT u.id, u.name,
             count(*)::int AS games,
             count(*) FILTER (WHERE g.status = 'won')::int AS wins,
             avg(g.score)::float8 AS avg_score,
@@ -311,7 +206,7 @@ app.get('/api/leaderboard', requireUser, h(async (req, res) => {
             min(g.score) FILTER (WHERE g.status = 'won')::int AS best_score
      FROM games g JOIN users u ON u.id = g.user_id
      WHERE g.${FINISHED}
-     GROUP BY u.id, u.username
+     GROUP BY u.id, u.name
      HAVING count(*) >= $1`,
     [LEADERBOARD_MIN_GAMES]
   );
@@ -339,10 +234,6 @@ app.use((err, req, res, next) => {
 });
 
 await migrate();
-// Expired sessions are useless; sweep them hourly.
-setInterval(() => {
-  pool.query('DELETE FROM sessions WHERE expires_at < now()').catch((e) => console.error(e));
-}, 3_600_000).unref();
 
 const server = app.listen(PORT, () => console.log(`mastermind listening on :${PORT}`));
 

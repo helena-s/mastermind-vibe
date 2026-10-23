@@ -50,11 +50,6 @@ async function api(path, { method = 'GET', body } = {}) {
     credentials: 'same-origin',
   });
   const data = await res.json().catch(() => ({}));
-  if (res.status === 401 && path !== '/login') {
-    me = null;
-    renderAccount();
-    if (location.hash !== '#/login') location.hash = '#/login';
-  }
   if (!res.ok) throw Object.assign(new Error(data.error || `Request failed (${res.status})`), { status: res.status });
   return data;
 }
@@ -95,88 +90,24 @@ const codeLabel = (code) => code.map((c) => PEGS[c].name).join(', ');
 function renderAccount() {
   document.getElementById('nav').hidden = !me;
   document.getElementById('account').hidden = !me;
-  document.getElementById('account-name').textContent = me ? me.username : '';
+  document.getElementById('account-name').textContent = me ? me.name : '';
 }
-
-document.getElementById('logout').addEventListener('click', async () => {
-  await api('/logout', { method: 'POST', body: {} }).catch(() => {});
-  me = null;
-  renderAccount();
-  location.hash = '#/login';
-});
 
 async function route() {
   clearInterval(timerHandle);
   document.onkeydown = null;
   const name = (location.hash.replace(/^#\/?/, '') || 'play').split('/')[0];
-  if (!me && name !== 'login') { location.hash = '#/login'; return; }
-  if (me && name === 'login') { location.hash = '#/play'; return; }
   for (const a of document.querySelectorAll('#nav a')) {
     if (a.dataset.route === name) a.setAttribute('aria-current', 'page');
     else a.removeAttribute('aria-current');
   }
-  const pages = { login: renderLogin, play: renderPlay, stats: renderStats, leaderboard: renderLeaderboard };
+  const pages = { play: renderPlay, stats: renderStats, leaderboard: renderLeaderboard };
   view.replaceChildren(el('p', { class: 'empty-note' }, 'Loading…'));
   try {
     await (pages[name] || renderPlay)();
   } catch (err) {
-    if (err.status !== 401) view.replaceChildren(el('p', { class: 'error' }, err.message));
+    view.replaceChildren(el('p', { class: 'error' }, err.message));
   }
-}
-
-// --- login / register ---
-
-function renderLogin() {
-  let mode = 'login';
-  const error = el('p', { class: 'error', role: 'alert' });
-  const username = el('input', { id: 'username', name: 'username', autocomplete: 'username', required: true, maxlength: 20 });
-  const password = el('input', { id: 'password', name: 'password', type: 'password', autocomplete: 'current-password', required: true, maxlength: 200 });
-  const userHint = el('span', { class: 'hint' });
-  const passHint = el('span', { class: 'hint' });
-  const submit = el('button', { class: 'btn', type: 'submit' });
-  const tabs = ['login', 'register'].map((m) =>
-    el('button', { type: 'button', role: 'tab', onclick: () => setMode(m) }, m === 'login' ? 'Log in' : 'Create account'));
-
-  function setMode(m) {
-    mode = m;
-    tabs.forEach((t, i) => t.setAttribute('aria-selected', String(['login', 'register'][i] === m)));
-    submit.textContent = m === 'login' ? 'Log in' : 'Create account';
-    password.setAttribute('autocomplete', m === 'login' ? 'current-password' : 'new-password');
-    userHint.textContent = m === 'register' ? '3–20 characters: letters, digits, _ or -' : '';
-    passHint.textContent = m === 'register' ? 'At least 8 characters' : '';
-    error.textContent = '';
-  }
-
-  const form = el('form', {
-    novalidate: true,
-    onsubmit: async (e) => {
-      e.preventDefault();
-      error.textContent = '';
-      submit.disabled = true;
-      try {
-        const { user } = await api(mode === 'login' ? '/login' : '/register', {
-          method: 'POST', body: { username: username.value.trim(), password: password.value },
-        });
-        me = user;
-        renderAccount();
-        location.hash = '#/play';
-      } catch (err) {
-        error.textContent = err.message;
-      } finally {
-        submit.disabled = false;
-      }
-    },
-  },
-    el('div', { class: 'field' }, el('label', { for: 'username' }, 'Username'), username, userHint),
-    el('div', { class: 'field' }, el('label', { for: 'password' }, 'Password'), password, passHint),
-    error, submit);
-
-  setMode('login');
-  view.replaceChildren(el('section', { class: 'auth' },
-    el('h1', {}, 'Crack the code'),
-    el('p', {}, 'Guess the secret 4-colour code in as few tries as possible.'),
-    el('div', { class: 'card' }, el('div', { class: 'auth-tabs', role: 'tablist' }, tabs), form)));
-  username.focus();
 }
 
 // --- play ---
@@ -471,7 +402,7 @@ async function renderLeaderboard() {
             cols.map((c) => el('th', { class: 'num' }, c.label)))),
           el('tbody', {}, rows.map((r, i) => el('tr', { class: String(r.id) === String(lb.me) ? 'me' : '' },
             el('td', { class: 'rank' }, i + 1),
-            el('td', {}, r.username),
+            el('td', {}, r.name),
             cols.map((c) => el('td', { class: 'num' }, c.value(r)))))))
       : el('p', { class: 'empty-note' }, `Nobody has finished ${lb.minGames} games yet.`));
 
@@ -496,8 +427,11 @@ window.addEventListener('hashchange', route);
 (async () => {
   try {
     ({ user: me } = await api('/me'));
-  } catch {
-    me = null;
+  } catch (err) {
+    view.replaceChildren(el('section', { class: 'start card' },
+      el('h1', {}, 'Who are you?'),
+      el('p', {}, err.message)));
+    return;
   }
   renderAccount();
   route();

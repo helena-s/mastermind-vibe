@@ -13,8 +13,8 @@
   },
   "dependencies": {
     "@fontsource/poppins": "^5.1.0",
-    "bcryptjs": "^2.4.3",
     "express": "^4.21.2",
+    "jose": "^5.10.0",
     "pg": "^8.13.1"
   }
 }

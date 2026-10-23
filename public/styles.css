@@ -80,20 +80,7 @@ p { margin: 0 0 1rem; color: var(--ink-2); }
 
 .card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 1.75rem; }
 
-.auth { max-width: 26rem; margin: 3rem auto; }
-.auth-tabs { display: flex; gap: 0.25rem; margin-bottom: 1.5rem; background: var(--bg-deep); border-radius: 2rem; padding: 0.25rem; }
-.auth-tabs button { flex: 1; font: inherit; font-weight: 500; border: 0; border-radius: 2rem; padding: 0.5rem; cursor: pointer; background: transparent; color: var(--ink-2); }
-.auth-tabs button[aria-selected="true"] { background: var(--surface-2); color: var(--ink); }
-.field { display: flex; flex-direction: column; gap: 0.35rem; margin-bottom: 1rem; }
-.field label { font-size: 0.9rem; font-weight: 500; }
-.field input {
-  font: inherit; color: var(--ink); background: var(--bg-deep); border: 1px solid var(--line-strong);
-  border-radius: var(--radius); padding: 0.65rem 0.9rem;
-}
-.field input:focus { border-color: var(--accent); outline: none; }
-.hint { font-size: 0.8rem; color: var(--ink-muted); }
 .error { color: var(--danger); font-size: 0.9rem; min-height: 1.4em; margin: 0 0 0.75rem; }
-.auth .btn { width: 100%; }
 
 /* --- Game --- */
 .game { display: grid; grid-template-columns: minmax(0, 1fr) 20rem; gap: 2rem; align-items: start; }

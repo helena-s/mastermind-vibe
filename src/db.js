@@ -16,20 +16,14 @@ function connectionConfig(env = process.env) {
 export const pool = new pg.Pool({ ...connectionConfig(), max: 10 });
 
 const SCHEMA = `
+-- One row per Elastx account; sub is the identity provider's stable user ID.
 CREATE TABLE IF NOT EXISTS users (
-  id            BIGSERIAL PRIMARY KEY,
-  username      TEXT NOT NULL,
-  password_hash TEXT NOT NULL,
-  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+  id         BIGSERIAL PRIMARY KEY,
+  sub        TEXT NOT NULL UNIQUE,
+  email      TEXT,
+  name       TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE UNIQUE INDEX IF NOT EXISTS users_username_lower ON users (lower(username));
-
-CREATE TABLE IF NOT EXISTS sessions (
-  token_hash TEXT PRIMARY KEY,
-  user_id    BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  expires_at TIMESTAMPTZ NOT NULL
-);
-CREATE INDEX IF NOT EXISTS sessions_user ON sessions (user_id);
 
 -- score: guesses needed to win (1-10), or 11 for a loss or abandoned game.
 -- points: 11 - score. Both are NULL while the game is in progress.
@@ -59,7 +53,25 @@ CREATE TABLE IF NOT EXISTS guesses (
 `;
 
 export async function migrate() {
-  await pool.query(SCHEMA);
+  const client = await pool.connect();
+  try {
+    // Replicas start together; only one may migrate at a time.
+    await client.query('SELECT pg_advisory_lock(727001)');
+    // v1 had username/password accounts. Those users can't be mapped to Elastx
+    // accounts, so the old data is discarded (agreed when switching to SSO).
+    const { rows } = await client.query(
+      `SELECT 1 FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = 'users' AND column_name = 'password_hash'`
+    );
+    if (rows.length) {
+      console.log('migrate: dropping v1 password-based tables');
+      await client.query('DROP TABLE IF EXISTS guesses, games, sessions, users CASCADE');
+    }
+    await client.query(SCHEMA);
+  } finally {
+    await client.query('SELECT pg_advisory_unlock(727001)').catch(() => {});
+    client.release();
+  }
 }
 
 export async function tx(fn) {
